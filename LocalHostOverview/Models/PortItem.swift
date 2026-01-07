@@ -10,6 +10,7 @@ struct PortItem: Identifiable, Equatable {
     var command: String? // e.g. "npm run dev"
     var hostApp: String? // e.g. "Terminal", "VSCode"
     var projectName: String?
+    var isBrowserConnected: Bool = false
     
     var url: URL? {
         URL(string: "http://localhost:\(port)")

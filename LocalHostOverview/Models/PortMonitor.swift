@@ -30,35 +30,73 @@ class PortMonitor: ObservableObject {
         DispatchQueue.global(qos: .background).async { [weak self] in
             guard let self = self else { return }
             
-            // 1. Scan fresh ports
-            var activeScannedPorts = self.scanPorts()
+            // 1. Scan Listeners (Existing Logic)
+            var activeListeners = self.fetchListeners()
             
-            // 2. Fast enrichment with project names
-            for i in 0..<activeScannedPorts.count {
-                activeScannedPorts[i].projectName = self.getProjectName(for: activeScannedPorts[i].pid)
+            // 2. Scan Browser Connections (New Logic)
+            let browserPorts = self.fetchBrowserPorts()
+            
+            // 3. Fast enrichment with project names
+            for i in 0..<activeListeners.count {
+                activeListeners[i].projectName = self.getProjectName(for: activeListeners[i].pid)
+            }
+            
+            // 4. Merge Data
+            // We want to keep all listeners.
+            // AND we want to ADD any port that is connected to by a browser, even if it wasn't a listener (or was hidden).
+            
+            var mergedPorts: [PortItem] = activeListeners
+            
+            // Mark listeners as browser connected if applicable
+            for i in 0..<mergedPorts.count {
+                if browserPorts.contains(mergedPorts[i].port) {
+                    mergedPorts[i].isBrowserConnected = true
+                }
+            }
+            
+            // Find browser ports that are NOT in the listener list
+            let existingPortNumbers = Set(mergedPorts.map { $0.port })
+            for port in browserPorts {
+                if !existingPortNumbers.contains(port) {
+                    // This is a "Hidden" port!
+                    // We don't know the PID or Project Name easily (since we didn't find a listener for it),
+                    // but we know it's active.
+                    let item = PortItem(
+                        id: "browser-connected-\(port)",
+                        port: port,
+                        processName: "Unknown",
+                        pid: "-1",
+                        user: "Unknown",
+                        title: nil,
+                        command: nil,
+                        hostApp: nil,
+                        projectName: "External/System",
+                        isBrowserConnected: true
+                    )
+                    mergedPorts.append(item)
+                }
             }
             
             DispatchQueue.main.async {
                 self.isRefreshing = false // Release lock
                 
-                // 3. Merge with existing data
-                for i in 0..<activeScannedPorts.count {
-                    if let existing = self.allPorts.first(where: { $0.id == activeScannedPorts[i].id }) {
-                        activeScannedPorts[i].title = existing.title
-                        
-                        // If we already checked this port, don't check again (unless it was reset?)
-                        // Actually, if we have a title, we are good.
+                var finalPorts = mergedPorts
+                
+                // 5. Merge with existing data (PRESERVE TITLES)
+                for i in 0..<finalPorts.count {
+                    if let existing = self.allPorts.first(where: { $0.port == finalPorts[i].port }) {
+                        // Inherit title if we have it
+                        finalPorts[i].title = existing.title
                     }
                 }
                 
-                // 4. Update source of truth
-                self.allPorts = activeScannedPorts
+                // 6. Update source of truth
+                self.allPorts = finalPorts
                 self.updateUI()
                 
-                // 5. Async Fetching Loop
+                // 7. Async Fetching Loop
                 for i in 0..<self.allPorts.count {
                     let portItem = self.allPorts[i]
-                    let portId = portItem.id
                     let port = portItem.port
                     
                     // Skip if:
@@ -70,7 +108,6 @@ class PortMonitor: ObservableObject {
                        !self.failedPorts.contains(port),
                        !self.checkedPorts.contains(port) {
                         
-                        // Mark as checked IMMEDIATELY to prevent double-fire in next loop
                         self.checkedPorts.insert(port)
                         
                         self.fetchTitle(for: url, port: port) { [weak self] title in
@@ -78,15 +115,12 @@ class PortMonitor: ObservableObject {
                             
                             if let title = title {
                                 DispatchQueue.main.async {
-                                    if let index = self.allPorts.firstIndex(where: { $0.id == portId }) {
+                                    // Update ALL ports with this number (could be 1)
+                                    if let index = self.allPorts.firstIndex(where: { $0.port == port }) {
                                         self.allPorts[index].title = title
                                         self.updateUI()
                                     }
                                 }
-                            } else {
-                                // Success (connected) but NO TITLE found.
-                                // We already marked it as checked, so we won't try again.
-                                // This is crucial for non-web services (Redis, etc.)
                             }
                         }
                     }
@@ -103,8 +137,11 @@ class PortMonitor: ObservableObject {
     }
     
     private func getFilteredPorts(from ports: [PortItem]) -> [PortItem] {
-        // 1. Filter out noise (root or empty)
-        let basicFiltered = ports.filter { $0.projectName != "/" && $0.projectName != "" && $0.projectName != nil }
+        // 1. Filter out noise (root or empty) - UNLESS IT IS BROWSER CONNECTED
+        let basicFiltered = ports.filter { item in
+            if item.isBrowserConnected { return true }
+            return item.projectName != "/" && item.projectName != "" && item.projectName != nil
+        }
         
         // 2. Group by project name
         let grouped = Dictionary(grouping: basicFiltered, by: { $0.projectName ?? "unknown" })
@@ -119,14 +156,17 @@ class PortMonitor: ObservableObject {
                 finalPorts.append(contentsOf: withTitles)
             } else {
                 // 4. If no ports have titles, show the lowest port
-                if let lowestPort = projectPorts.min(by: { $0.port < $1.port }) {
+                // BUT PREFER BROWSER CONNECTED ONE
+                
+                if let browserConnected = projectPorts.first(where: { $0.isBrowserConnected }) {
+                    finalPorts.append(browserConnected)
+                } else if let lowestPort = projectPorts.min(by: { $0.port < $1.port }) {
                     finalPorts.append(lowestPort)
                 }
             }
         }
         
         // Sort alphabetically by project name, then by port number
-        // Stable sort: primary key project name, secondary key port
         return finalPorts.sorted {
             if $0.projectName == $1.projectName {
                 return $0.port < $1.port
@@ -135,7 +175,7 @@ class PortMonitor: ObservableObject {
         }
     }
     
-    private func scanPorts() -> [PortItem] {
+    private func fetchListeners() -> [PortItem] {
         let task = Process()
         task.launchPath = "/usr/sbin/lsof"
         task.arguments = ["-iTCP", "-sTCP:LISTEN", "-P", "-n"]
@@ -150,7 +190,57 @@ class PortMonitor: ObservableObject {
             
             return parseLsofOutput(output)
         } catch {
-            print("Error running lsof: \(error)")
+            print("Error running lsof (listeners): \(error)")
+            return []
+        }
+    }
+    
+    private func fetchBrowserPorts() -> Set<Int> {
+        let task = Process()
+        task.launchPath = "/usr/sbin/lsof"
+        task.arguments = ["-i", "@localhost", "-P", "-n"]
+        
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        
+        do {
+            try task.run()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            guard let output = String(data: data, encoding: .utf8) else { return [] }
+            
+            var browserPorts: Set<Int> = []
+            let lines = output.components(separatedBy: .newlines)
+            
+            // Expected line format:
+            // COMMAND   PID   USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME
+            // Google    38799 user   39u  IPv4 0x123...      0t0  TCP localhost:56789->localhost:3000 (ESTABLISHED)
+            
+            let browserNames = ["browser", "google", "chrome", "arc", "safari", "firefox", "webkit"]
+            
+            for line in lines.dropFirst() {
+                let lowerLine = line.lowercased()
+                
+                // 1. Check if it's a browser process
+                let isBrowser = browserNames.contains { lowerLine.contains($0) }
+                if !isBrowser { continue }
+                
+                // 2. Parse the connection "localhost:XXX->localhost:YYY"
+                // We care about YYY (the destination port)
+                
+                if let arrowRange = line.range(of: "->") {
+                     let destinationPart = String(line[arrowRange.upperBound...])
+                     // destinationPart should look like "localhost:3000 (ESTABLISHED)"
+                     
+                     if let portString = destinationPart.split(separator: ":").last?.split(separator: " ").first,
+                        let port = Int(portString) {
+                         browserPorts.insert(port)
+                     }
+                }
+            }
+            
+            return browserPorts
+        } catch {
+            print("Error running lsof (browser): \(error)")
             return []
         }
     }

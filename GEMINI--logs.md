@@ -107,3 +107,87 @@ I have built a native macOS Menu Bar application that provides a real-time overv
 - **Refinement**: Implemented a "Failed Port Blacklist". If a port refuses connection or drops it (causing console spam), the app will blacklist it for the session to prevent further CPU/Network usage.
 - **New Feature**: Added a "Terminate" button that appears when hovering over a port, allowing users to instantly kill the process.
 - **Optimization**: Fixed a Critical Bug where non-web ports (e.g., DBs) were being infinitely retried for titles, causing massive console spam. Implemented `checkedPorts` to ensure we only check each port once, and `isRefreshing` to preventing overlapping scan loops.
+
+<a name="log-20260107-hybrid-port-scanning"></a>
+## User Prompt
+There are ports that I cannot see in our app but I know they are being used. Probably tyhe best way is to change the approach. Instead of going through every port, shouldnt we just do something like 'lsof -i @localhost' (found this in the web) and get all the ones that I care of? I think I only care about the COMMAND:BROWSER ones, no? What do you think
+
+## Implementation Plan
+# Refactor Port Detection Logic
+
+The goal is to improve port detection by prioritizing ports actively accessed by web browsers (Chrome, Arc, Safari, etc.) while maintaining server process details (Project Name) where possible. This addresses the issue where relevant ports (e.g., system services or filtered paths) were hidden.
+
+## User Review Required
+
+> [!IMPORTANT]
+> This change introduces a hybrid scanning approach:
+> 1.  It still scans for **Listeners** (servers) to identify Project Names.
+> 2.  It now ALSO scans for **Browser Connections** (`lsof -i @localhost`).
+> 3.  **Key Change**: Ports connected to by a Browser will be SHOWN even if they were previously filtered out (e.g., becuase they run from `/` or have no detectible project name).
+>
+> We will assume "Browser" refers to processes named: `Browser`, `Google Chrome`, `Arc`, `Safari`, `firefox`, `com.apple.WebKit`. (Case insensitive partial matching).
+
+## Proposed Changes
+
+### [LocalHostOverview]
+
+#### [MODIFY] [PortItem.swift](file:///Users/martinmana/Documents/Projects/localhost-overview/LocalHostOverview/Models/PortItem.swift)
+- Add `var isBrowserConnected: Bool = false` to `PortItem`.
+
+#### [MODIFY] [PortMonitor.swift](file:///Users/martinmana/Documents/Projects/localhost-overview/LocalHostOverview/Models/PortMonitor.swift)
+- **Split `scanPorts()`** into:
+    - `fetchListeners() -> [PortItem]`: The existing logic (finding listeners).
+    - `fetchBrowserPorts() -> Set<Int>`: New logic running `lsof -i @localhost` and parsing connections.
+- **Update `refreshPorts()`**:
+    - Call both functions.
+    - specialized merging logic:
+        - Start with `activeListeners`.
+        - Mark items as `isBrowserConnected` if their port is in `browserPorts`.
+        - **Crucial**: If a port is in `browserPorts` but NOT in `activeListeners` (e.g. hidden listener), create a new "Raw" `PortItem` for it (pid: "unknown", project: "External/System") so it appears.
+- **Update `getFilteredPorts()`**:
+    - Allow items to pass the filter if `isBrowserConnected` is true, even if `projectName` is invalid.
+
+## Verification Plan
+
+### Manual Verification
+- **Run the App**: Launch LocalHost Overview.
+- **Test Standard Server**: Start a `vite` or `next` app. Open it in a browser. Verify it appears with Project Name.
+- **Test Hidden Server**:
+    - Start a server that usually gets filtered (e.g. `python3 -m http.server 8000` from `/`).
+    - Connect to it in Chrome.
+    - Verify it NOW appears in the list (as "Active Connection" or similar).
+- **Test Clutter**: Ensure random background connections (not browser) do not spam the list.
+
+## Walkthrough
+# Walkthrough - Hybrid Port Scanning
+
+I successfully implemented the hybrid port scanning mechanism to resolve the issue of invisible ports.
+
+## Changes
+
+### 1. Model Updates in `PortItem.swift`
+- Added `isBrowserConnected: Bool` flag to `PortItem`.
+
+### 2. Logic Updates in `PortMonitor.swift`
+- **Split Scanning Logic**:
+    - `fetchListeners()`: Continues to scan for server processes (listeners) to get PIDs and Project Names.
+    - `fetchBrowserPorts()`: **[NEW]** Scans `lsof -i @localhost` to find ports that the browser is actively connecting to.
+- **Improved Merging`:
+    - The app now prioritizes listeners but **augments** them with browser interactions.
+    - If a port is "hidden" (no listener found/system process) but a browser is talking to it, it is now added to the list as "External/System".
+- **Refined Filtering**:
+    - The `getFilteredPorts` function now **bypasses filters** (like root directory ignoring) if `isBrowserConnected` is true.
+
+## Verification Results
+
+### Build Verification
+Ran `swift build` and confirmed the project compiles successfully with the new logic.
+
+```bash
+[12/12] Applying LocalHostOverview                           
+Build complete! (9.90s)
+```
+
+### Functional Expectation
+1.  **Standard Dev Servers**: Will show up as usual with Project Names.
+2.  **Hidden/System Servers**: If you open them in the browser, they will magically appear in the menu bar list, ensuring you can track everything you are working on.

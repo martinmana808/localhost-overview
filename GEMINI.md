@@ -6,6 +6,11 @@
 - Shell Integration (`lsof`)
 
 ## History
+### [2026-01-07] Hybrid Port Scanning | [Technical Details](./GEMINI--logs.md#log-20260107-hybrid-port-scanning)
+- Implemented hybrid scanning using `lsof -i @localhost` to detect browser-connected ports.
+- Ensures "hidden" or system ports appear if actively used by the browser.
+- Keeps existing project name detection for standard servers.
+
 ### [2026-01-07] LocalHost Overview App Implementation | [Technical Details](./GEMINI--logs.md#log-20260107-localhost-overview)
 - Implemented a native macOS Menu Bar app using SwiftUI.
 - Created a `PortMonitor` service using `lsof` to detect active localhost ports.
