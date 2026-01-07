@@ -100,3 +100,10 @@ I have built a native macOS Menu Bar application that provides a real-time overv
 - **UI Polish**: Increased window height to 800px, changed URL color to white (90% opacity), and darkened the background to match system menus like Shortcuts.
 - **Performance Optimization**: Refactored `PortMonitor` to update the UI instantly after detection and fetch titles asynchronously with a 1.5s timeout. This resolves delays and console timeout errors.
 - **Documentation**: Created a professional `README.md` for GitHub and provided a project description for the repository.
+- **Git**: Initialized repository, added `.gitignore`, and pushed to [GitHub](https://github.com/martinmana808/localhost-overview).
+- **Bug Fix**: fixed an issue where projects with multiple ports (like Stihl) would hide the main web app if it wasn't the lowest port number. logic now correctly prioritizes ports with titles even if they were initially filtered out.
+- **Optimization**: Implemented title caching to stop the app from re-fetching website titles every 3 seconds. This eliminates the "reloading all the time" issue and the massive console spam of "Connection refused" errors.
+- **New Feature**: Added display of the actual process command (e.g., `npm run dev`) and the host application (e.g., `Terminal`, `VS Code`) to the UI.
+- **Refinement**: Implemented a "Failed Port Blacklist". If a port refuses connection or drops it (causing console spam), the app will blacklist it for the session to prevent further CPU/Network usage.
+- **New Feature**: Added a "Terminate" button that appears when hovering over a port, allowing users to instantly kill the process.
+- **Optimization**: Fixed a Critical Bug where non-web ports (e.g., DBs) were being infinitely retried for titles, causing massive console spam. Implemented `checkedPorts` to ensure we only check each port once, and `isRefreshing` to preventing overlapping scan loops.

@@ -3,6 +3,10 @@ import Combine
 
 class PortMonitor: ObservableObject {
     @Published var activePorts: [PortItem] = []
+    private var allPorts: [PortItem] = []
+    private var failedPorts: Set<Int> = [] 
+    private var checkedPorts: Set<Int> = [] // Ports we have already tried to fetch title for (success or fail)
+    private var isRefreshing = false
     private var timer: AnyCancellable?
     
     init() {
@@ -19,29 +23,71 @@ class PortMonitor: ObservableObject {
     }
     
     func refreshPorts() {
-        DispatchQueue.global(qos: .background).async {
-            var ports = self.scanPorts()
+        // Prevent overlapping refreshes
+        guard !isRefreshing else { return }
+        isRefreshing = true
+        
+        DispatchQueue.global(qos: .background).async { [weak self] in
+            guard let self = self else { return }
             
-            // 1. Fast enrichment with project names
-            for i in 0..<ports.count {
-                ports[i].projectName = self.getProjectName(for: ports[i].pid)
+            // 1. Scan fresh ports
+            var activeScannedPorts = self.scanPorts()
+            
+            // 2. Fast enrichment with project names
+            for i in 0..<activeScannedPorts.count {
+                activeScannedPorts[i].projectName = self.getProjectName(for: activeScannedPorts[i].pid)
             }
             
-            // 2. Update UI with initial list immediately
-            self.updateUI(with: ports)
-            
-            // 3. Fetch titles asynchronously (one by one) and update UI as they arrive
-            for i in 0..<ports.count {
-                guard let url = ports[i].url else { continue }
-                let portId = ports[i].id
+            DispatchQueue.main.async {
+                self.isRefreshing = false // Release lock
                 
-                self.fetchTitle(for: url) { [weak self] title in
-                    guard let self = self, let title = title else { return }
-                    DispatchQueue.main.async {
-                        if let index = self.activePorts.firstIndex(where: { $0.id == portId }) {
-                            self.activePorts[index].title = title
-                            // Re-filter to handle deduplication logic once we have a title
-                            self.refilterUI()
+                // 3. Merge with existing data
+                for i in 0..<activeScannedPorts.count {
+                    if let existing = self.allPorts.first(where: { $0.id == activeScannedPorts[i].id }) {
+                        activeScannedPorts[i].title = existing.title
+                        
+                        // If we already checked this port, don't check again (unless it was reset?)
+                        // Actually, if we have a title, we are good.
+                    }
+                }
+                
+                // 4. Update source of truth
+                self.allPorts = activeScannedPorts
+                self.updateUI()
+                
+                // 5. Async Fetching Loop
+                for i in 0..<self.allPorts.count {
+                    let portItem = self.allPorts[i]
+                    let portId = portItem.id
+                    let port = portItem.port
+                    
+                    // Skip if:
+                    // 1. We already have a title
+                    // 2. We already FAILED this port (failedPorts)
+                    // 3. We already CHECKED this port and found nothing (checkedPorts)
+                    if portItem.title == nil,
+                       let url = portItem.url,
+                       !self.failedPorts.contains(port),
+                       !self.checkedPorts.contains(port) {
+                        
+                        // Mark as checked IMMEDIATELY to prevent double-fire in next loop
+                        self.checkedPorts.insert(port)
+                        
+                        self.fetchTitle(for: url, port: port) { [weak self] title in
+                            guard let self = self else { return }
+                            
+                            if let title = title {
+                                DispatchQueue.main.async {
+                                    if let index = self.allPorts.firstIndex(where: { $0.id == portId }) {
+                                        self.allPorts[index].title = title
+                                        self.updateUI()
+                                    }
+                                }
+                            } else {
+                                // Success (connected) but NO TITLE found.
+                                // We already marked it as checked, so we won't try again.
+                                // This is crucial for non-web services (Redis, etc.)
+                            }
                         }
                     }
                 }
@@ -49,17 +95,8 @@ class PortMonitor: ObservableObject {
         }
     }
     
-    private func updateUI(with ports: [PortItem]) {
-        let filtered = self.getFilteredPorts(from: ports)
-        DispatchQueue.main.async {
-            if self.activePorts != filtered {
-                self.activePorts = filtered
-            }
-        }
-    }
-    
-    private func refilterUI() {
-        let filtered = self.getFilteredPorts(from: self.activePorts)
+    private func updateUI() {
+        let filtered = self.getFilteredPorts(from: self.allPorts)
         if self.activePorts != filtered {
             self.activePorts = filtered
         }
@@ -88,7 +125,14 @@ class PortMonitor: ObservableObject {
             }
         }
         
-        return finalPorts.sorted(by: { $0.projectName ?? "" < $1.projectName ?? "" })
+        // Sort alphabetically by project name, then by port number
+        // Stable sort: primary key project name, secondary key port
+        return finalPorts.sorted {
+            if $0.projectName == $1.projectName {
+                return $0.port < $1.port
+            }
+            return $0.projectName ?? "" < $1.projectName ?? ""
+        }
     }
     
     private func scanPorts() -> [PortItem] {
@@ -138,11 +182,20 @@ class PortMonitor: ObservableObject {
         return nil
     }
     
-    private func fetchTitle(for url: URL, completion: @escaping (String?) -> Void) {
+    private func fetchTitle(for url: URL, port: Int, completion: @escaping (String?) -> Void) {
         var request = URLRequest(url: url)
-        request.timeoutInterval = 1.5 // Fast timeout for local servers
+        request.timeoutInterval = 1.0 // Very fast timeout
         
-        let task = URLSession.shared.dataTask(with: request) { data, response, error in
+        let task = URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            if error != nil {
+                // Network error (refused, timeout, lost connection) -> Blacklist this port
+                DispatchQueue.main.async {
+                    self?.failedPorts.insert(port)
+                }
+                completion(nil)
+                return
+            }
+            
             guard let data = data, let html = String(data: data, encoding: .utf8) else {
                 completion(nil)
                 return
@@ -160,6 +213,23 @@ class PortMonitor: ObservableObject {
             completion(nil)
         }
         task.resume()
+    }
+    
+    func killProcess(pid: String) {
+        guard let pidInt = Int32(pid) else { return }
+        kill(pidInt, SIGTERM)
+        
+        // Optimistically remove from UI
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.activePorts.removeAll { $0.pid == pid }
+            self.allPorts.removeAll { $0.pid == pid }
+            
+            // Re-trigger refresh to confirm
+            DispatchQueue.global(qos: .background).asyncAfter(deadline: .now() + 0.5) {
+                self.refreshPorts()
+            }
+        }
     }
     
     private func parseLsofOutput(_ output: String) -> [PortItem] {
@@ -187,6 +257,8 @@ class PortMonitor: ObservableObject {
                         pid: pid,
                         user: user,
                         title: nil,
+                        command: nil,
+                        hostApp: nil,
                         projectName: nil
                     )
                     items.append(item)

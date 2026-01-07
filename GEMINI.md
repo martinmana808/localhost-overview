@@ -16,6 +16,9 @@
 - **Deduplication**: Implemented smart filtering to remove non-web "function" ports when the main app is detected.
 - **Performance**: Optimized refreshing logic to be instant and added request timeouts.
 - **UI Polish**: Increased window height to 800px, darkened background, and improved contrast.
+- **Optimization**: Fixed critical console spam/cpu usage by implementing a "Failed Port Blacklist" and preventing retry loops on non-web ports.
+- **Feature**: Added "Terminate Process" button (available on hover) to kill active servers directly from the menu.
+- **Git**: Published source code to GitHub with a comprehensive `README.md`.
 - Fixed AppKit SF Symbol initialization error.
 
 - **2026-01-07**: Initial Project setup and manifesto creation.

@@ -13,7 +13,9 @@ struct MenuBarView: View {
                 ScrollView {
                     VStack(spacing: 8) {
                         ForEach(monitor.activePorts) { item in
-                            PortRow(item: item)
+                            PortRow(item: item) { pid in
+                                monitor.killProcess(pid: pid)
+                            }
                         }
                     }
                     .padding(12)
@@ -84,54 +86,74 @@ struct MenuBarView: View {
 
 struct PortRow: View {
     let item: PortItem
+    let onKill: (String) -> Void
     @State private var isHovered = false
+    @State private var showKillButton = false
     
     var body: some View {
-        Button(action: {
-            if let url = item.url {
-                NSWorkspace.shared.open(url)
-            }
-        }) {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Image(systemName: "globe")
-                        .font(.system(size: 10))
-                        .foregroundColor(.white.opacity(0.9))
-                    Text(item.url?.absoluteString ?? "http://localhost:\(item.port)")
-                        .font(.system(size: 11, weight: .medium, design: .monospaced))
-                        .foregroundColor(.white.opacity(0.9))
-                    Spacer()
+        HStack(spacing: 0) {
+            Button(action: {
+                if let url = item.url {
+                    NSWorkspace.shared.open(url)
                 }
-                
-                if let title = item.title {
-                    Text(title)
-                        .font(.system(size: 14, weight: .semibold))
-                        .lineLimit(1)
-                } else if let projectName = item.projectName {
-                    Text(projectName)
-                        .font(.system(size: 14, weight: .semibold))
-                        .lineLimit(1)
-                } else {
-                    Text(item.processName)
-                        .font(.system(size: 14, weight: .semibold))
-                        .lineLimit(1)
+            }) {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Image(systemName: "globe")
+                            .font(.system(size: 10))
+                            .foregroundColor(.white.opacity(0.9))
+                        Text(item.url?.absoluteString ?? "http://localhost:\(item.port)")
+                            .font(.system(size: 11, weight: .medium, design: .monospaced))
+                            .foregroundColor(.white.opacity(0.9))
+                        Spacer()
+                    }
+                    
+                    if let title = item.title {
+                        Text(title)
+                            .font(.system(size: 14, weight: .semibold))
+                            .lineLimit(1)
+                    } else if let projectName = item.projectName {
+                        Text(projectName)
+                            .font(.system(size: 14, weight: .semibold))
+                            .lineLimit(1)
+                    } else {
+                        Text(item.processName)
+                            .font(.system(size: 14, weight: .semibold))
+                            .lineLimit(1)
+                    }
                 }
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .padding(12)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: 12)
-                    .fill(isHovered ? Color.white.opacity(0.15) : Color.white.opacity(0.08))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(Color.white.opacity(0.1), lineWidth: 1)
-            )
+            .buttonStyle(.plain)
+            
+            if showKillButton {
+                Button(action: {
+                    onKill(item.pid)
+                }) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 16))
+                        .foregroundColor(.red.opacity(0.8))
+                        .frame(width: 44, height: 60) // Match height
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .transition(.move(edge: .trailing).combined(with: .opacity))
+            }
         }
-        .buttonStyle(.plain)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(isHovered ? Color.white.opacity(0.15) : Color.white.opacity(0.08))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(Color.white.opacity(0.1), lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 12)) // Ensure kill button slides nicely
         .onHover { hovering in
-            withAnimation(.easeInOut(duration: 0.15)) {
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
                 isHovered = hovering
+                showKillButton = hovering
             }
         }
     }
